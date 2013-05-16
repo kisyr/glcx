@@ -1,0 +1,2 @@
+Light header-only library for OpenGL context and window management that 
+keeps as close as can be to Khronos EGL. Utlizes GLX and WGL.
