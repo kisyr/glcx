@@ -10,6 +10,8 @@ extern "C" {
 #include <stdio.h>
 #include <GL/gl.h>
 
+#define __GLCX_LOG(fmt, ...) fprintf(stderr, "glcx: " fmt "\n", ##__VA_ARGS__)
+
 /*****************************************************************************
  * API                                                                       *
  *****************************************************************************/
@@ -26,7 +28,7 @@ enum
 
 enum
 {
-    GLCX_KEY_ESCAPE = 100,
+    GLCX_KEY_ESCAPE = 128,
 };
 
 enum 
@@ -35,6 +37,7 @@ enum
     GLCX_EVENT_KEYDOWN,
     GLCX_EVENT_KEYUP,
     GLCX_EVENT_BUTTONDOWN,
+    GLCX_EVENT_RESIZE,
 };
 
 enum
@@ -56,6 +59,7 @@ typedef struct
     GLint keydown;
     GLint keyup;
     GLint buttondown;
+    GLint resize[2];
 } GLCXevent;
 
 static inline GLboolean glcxChooseConfig(const GLint*, GLCXconfig*, GLint, GLint*);
@@ -68,17 +72,57 @@ static inline GLCXwindow glcxCreateWindow(const GLCXconfig, const GLint*);
 static inline GLboolean glcxDestroyWindow(GLCXwindow);
 static inline GLboolean glcxSwapBuffers(GLCXwindow);
 static inline GLboolean glcxPollEvent(GLCXevent*);
+static inline GLboolean glcxPostEvent(GLCXwindow, GLenum, GLint);
 
 static inline GLCXpbuffer glcxCreatePbuffer(const GLCXconfig, const GLint*);
 static inline GLboolean glcxDestroyPbuffer(GLCXpbuffer);
 
-static inline GLboolean glcxShouldExit();
+static inline GLboolean glcxShouldQuit();
 
 void* glcxMalloc(size_t sz)
 {
     void* mem = malloc(sz);
     memset(mem, 0, sz);
     return mem;
+}
+
+#define __GLCX_WINDOW_LIST_SIZE 256
+GLCXwindow glcx_window_list[__GLCX_WINDOW_LIST_SIZE] = {0};
+
+void glcxPushWindow(GLCXwindow window)
+{
+    size_t i;
+
+    for(i = 0; i < __GLCX_WINDOW_LIST_SIZE; ++i) {
+        if(!glcx_window_list[i]) {
+            glcx_window_list[i] = window;
+            break;
+        }
+    }
+}
+
+void glcxPopWindow(GLCXwindow window)
+{
+    size_t i;
+
+    for(i = 0; i < __GLCX_WINDOW_LIST_SIZE; ++i) {
+        if(glcx_window_list[i] == window) {
+            glcx_window_list[i] = NULL;
+            break;
+        }
+    }
+}
+
+GLboolean glcxShouldQuit()
+{
+    size_t i;
+
+    for(i = 0; i < __GLCX_WINDOW_LIST_SIZE; ++i) {
+        if(glcx_window_list[i])
+            return GL_FALSE;
+    }
+
+    return GL_TRUE;
 }
 
 /*****************************************************************************
@@ -106,6 +150,7 @@ struct _GLCXwindow
     GLenum type;
     Window object;
     Atom wm_delete;
+    GLint size[2];
 };
 
 struct _GLCXpbuffer
@@ -115,14 +160,15 @@ struct _GLCXpbuffer
 };
 
 Display* glcx_display = NULL;
-#define glcx_window_list_size 256
-GLCXwindow glcx_window_list[glcx_window_list_size] = {0};
+#if 0
+#define __GLCX_WINDOW_LIST_SIZE 256
+GLCXwindow glcx_window_list[__GLCX_WINDOW_LIST_SIZE] = {0};
 
 void glcxPushWindow(GLCXwindow window)
 {
     size_t i;
 
-    for(i = 0; i < glcx_window_list_size; ++i) {
+    for(i = 0; i < __GLCX_WINDOW_LIST_SIZE; ++i) {
         if(!glcx_window_list[i]) {
             glcx_window_list[i] = window;
             break;
@@ -134,14 +180,14 @@ void glcxPopWindow(GLCXwindow window)
 {
     size_t i;
 
-    for(i = 0; i < glcx_window_list_size; ++i) {
+    for(i = 0; i < __GLCX_WINDOW_LIST_SIZE; ++i) {
         if(glcx_window_list[i] == window) {
             glcx_window_list[i] = NULL;
             break;
         }
     }
 }
-
+#endif
 GLboolean glcxChooseConfig(
     const GLint* attributes, 
     GLCXconfig* configs,
@@ -156,15 +202,16 @@ GLboolean glcxChooseConfig(
     GLXFBConfig* glx_configs;
     GLint i;
 
-    if(!glcx_display)
+    if(!glcx_display) {
         glcx_display = XOpenDisplay(NULL);
+    }
 
-    if(False == glXQueryVersion(glcx_display, &ver_maj, &ver_min)) {
-        fprintf(stderr, "glXQueryVersion\n");
+    if(glXQueryVersion(glcx_display, &ver_maj, &ver_min) == False) {
+        __GLCX_LOG("glXQueryVersion failed");
         return GL_FALSE;
     }
     if(ver_maj < 2 && ver_min < 3) {
-        fprintf(stderr, "GLX version %d.%d < 1.3\n", ver_maj, ver_min);
+        __GLCX_LOG("GLX version %d.%d < 1.3", ver_maj, ver_min);
         return GL_FALSE;
     }
 
@@ -175,6 +222,7 @@ GLboolean glcxChooseConfig(
         case GLCX_ATTR_TRUE:         *glx_attribute = True;             break;
         case GLCX_ATTR_FALSE:        *glx_attribute = False;            break;
         case GLCX_ATTR_DOUBLEBUFFER: *glx_attribute = GLX_DOUBLEBUFFER; break;
+        // NOTE: Is this behaviour necceseary?
         default:                     *glx_attribute = *attribute;       break;
         }
     }
@@ -186,7 +234,7 @@ GLboolean glcxChooseConfig(
         &glx_num_configs);
 
     if(!glx_configs) {
-        fprintf(stderr, "glXChooseFBConfig\n");
+        __GLCX_LOG("glXChooseFBConfig");
         return GL_FALSE;
     }
 
@@ -211,7 +259,7 @@ GLCXcontext glcxCreateContext(const GLCXconfig config)
         NULL,
         True);
     if(!context->object) {
-        fprintf(stderr, "glXCreateContext");
+        __GLCX_LOG("glXCreateContext failed");
         glcxDestroyContext(context);
         return NULL;
     }
@@ -232,31 +280,41 @@ GLboolean glcxDestroyContext(GLCXcontext context)
 GLboolean glcxMakeCurrent(GLCXdrawable drawable, GLCXcontext context)
 {
     GLenum* type = (GLenum*)drawable;
-    GLXDrawable glx_drawable = 0;
+    GLXDrawable glx_drawable;
+
     switch(*type) {
     case GLCX_TYPE_WINDOW:  glx_drawable = ((GLCXwindow)drawable)->object;  break;
     case GLCX_TYPE_PBUFFER: glx_drawable = ((GLCXpbuffer)drawable)->object; break;
+    default:                return GL_FALSE;
     }
 
-    return glXMakeContextCurrent(
+    if(glXMakeContextCurrent(
         glcx_display,
         glx_drawable, 
         glx_drawable, 
-        context->object) == True ? GL_TRUE : GL_FALSE;
+        context->object) != True) {
+        __GLCX_LOG("glXMakeContextCurrent failed");
+        return GL_FALSE;
+    }
+
+    return GL_TRUE;
 }
 
 GLCXwindow glcxCreateWindow(const GLCXconfig config, const GLint* attributes)
 {
     GLCXwindow window = glcxMalloc(sizeof(struct _GLCXwindow));
-    GLint window_size[2] = { 640, 480 };
     const GLint* attribute;
+
+    window->type = GLCX_TYPE_WINDOW;
+    window->size[0] = 640;
+    window->size[1] = 480;
 
     for(attribute = attributes; 
     attribute && *attribute != GLCX_ATTR_NONE; 
     ++attribute) {
         switch(*attribute) {
-        case GLCX_ATTR_WIDTH:  window_size[0] = *(attribute + 1); break;
-        case GLCX_ATTR_HEIGHT: window_size[1] = *(attribute + 1); break;
+        case GLCX_ATTR_WIDTH:  window->size[0] = *(attribute + 1); break;
+        case GLCX_ATTR_HEIGHT: window->size[1] = *(attribute + 1); break;
         }
     }
 
@@ -264,10 +322,10 @@ GLCXwindow glcxCreateWindow(const GLCXconfig config, const GLint* attributes)
     XSetWindowAttributes swa;
 
     swa.colormap = XCreateColormap(
-    glcx_display, 
-    RootWindow(glcx_display, visual->screen),
-    visual->visual,
-    AllocNone);
+        glcx_display, 
+        RootWindow(glcx_display, visual->screen),
+        visual->visual,
+        AllocNone);
     //swa.background_pixmap = None;
     swa.background_pixel = BlackPixel(glcx_display, visual->screen);
     swa.border_pixel = 0;
@@ -281,7 +339,7 @@ GLCXwindow glcxCreateWindow(const GLCXconfig config, const GLint* attributes)
         glcx_display,
         RootWindow(glcx_display, visual->screen),
         0, 0, 
-        window_size[0], window_size[1],
+        window->size[0], window->size[1],
         0, 
         visual->depth,
         InputOutput,
@@ -289,7 +347,7 @@ GLCXwindow glcxCreateWindow(const GLCXconfig config, const GLint* attributes)
         CWBorderPixel | CWBackPixel | CWColormap | CWEventMask,
         &swa);
     if(!window->object) {
-        fprintf(stderr, "XCreateWindow\n");
+        __GLCX_LOG("XCreateWindow failed");
         glcxDestroyWindow(window);
         return NULL;
     }
@@ -300,8 +358,6 @@ GLCXwindow glcxCreateWindow(const GLCXconfig config, const GLint* attributes)
     XFree(visual);
     XStoreName(glcx_display, window->object, "GLCX Window");
     XMapWindow(glcx_display, window->object);
-
-    window->type = GLCX_TYPE_WINDOW;
 
     glcxPushWindow(window);
 
@@ -324,6 +380,8 @@ GLboolean glcxDestroyWindow(GLCXwindow window)
 GLboolean glcxSwapBuffers(GLCXwindow window)
 {
     glXSwapBuffers(glcx_display, window->object);
+
+    return GL_TRUE;
 }
 
 GLCXpbuffer glcxCreatePbuffer(const GLCXconfig config, const GLint* attributes)
@@ -332,6 +390,8 @@ GLCXpbuffer glcxCreatePbuffer(const GLCXconfig config, const GLint* attributes)
     GLint glx_attributes[256] = { None };
     GLint* glx_attribute;
     const GLint* attribute;
+
+    pbuffer->type = GLCX_TYPE_PBUFFER;
 
     for(attribute = attributes, glx_attribute = glx_attributes;
     attribute && *attribute != GLCX_ATTR_NONE; 
@@ -348,12 +408,10 @@ GLCXpbuffer glcxCreatePbuffer(const GLCXconfig config, const GLint* attributes)
         config.object,
         glx_attributes);
     if(!pbuffer->object) {
-        fprintf(stderr, "glXCreatePbuffer\n");
+        __GLCX_LOG("glXCreatePbuffer failed");
         glcxDestroyPbuffer(pbuffer);
         return NULL;
     }
-
-    pbuffer->type = GLCX_TYPE_PBUFFER;
 
     return pbuffer;
 }
@@ -389,7 +447,7 @@ GLboolean glcxPollEvent(GLCXevent* event)
     if(XPending(glcx_display) > 0) {
         XNextEvent(glcx_display, &glx_event);
 
-        for(i = 0; i < glcx_window_list_size; ++i) {
+        for(i = 0; i < __GLCX_WINDOW_LIST_SIZE; ++i) {
             if(glcx_window_list[i] 
             && glcx_window_list[i]->object == glx_event.xany.window) {
                 event->window = glcx_window_list[i];
@@ -398,8 +456,7 @@ GLboolean glcxPollEvent(GLCXevent* event)
         }
 
         if(!event->window) {
-            fprintf(stderr, "glcxPollEvent: null window; event: %d\n", 
-                glx_event.type);
+            __GLCX_LOG("glcxPollEvent null window; event: %d", glx_event.type);
             return GL_FALSE;
         }
 
@@ -417,24 +474,20 @@ GLboolean glcxPollEvent(GLCXevent* event)
             event->type = GLCX_EVENT_KEYUP;
             event->keyup = glcxTranslateKey(glx_event.xkey.keycode);
             break;
+        case ConfigureNotify:
+            if(glx_event.xconfigure.width != event->window->size[0]
+            || glx_event.xconfigure.height != event->window->size[1]) {
+                event->type = GLCX_EVENT_RESIZE;
+                event->resize[0] = event->window->size[0] = glx_event.xconfigure.width;
+                event->resize[1] = event->window->size[1] = glx_event.xconfigure.height;
+            }
+            break;
         }
 
         return GL_TRUE;
     }
 
     return GL_FALSE;
-}
-
-GLboolean glcxShouldExit()
-{
-    size_t i;
-
-    for(i = 0; i < glcx_window_list_size; ++i) {
-        if(glcx_window_list[i])
-            return GL_FALSE;
-    }
-
-    return GL_TRUE;
 }
 
 #endif
@@ -444,6 +497,321 @@ GLboolean glcxShouldExit()
  *****************************************************************************/
 
 #ifdef __GLCX_WGL
+
+#include <windows.h>
+
+#define __GLCX_WINDOW_CLASS_NAME "GLCX_WINDOW"
+#define __GLCX_MSG_CLOSE WM_USER+1
+
+struct _GLCXconfig
+{
+    PIXELFORMATDESCRIPTOR pixel_format_desc;
+    GLint pixel_format;
+};
+
+struct _GLCXcontext
+{
+    HGLRC object;
+};
+
+struct _GLCXwindow
+{
+    GLenum type;
+    HWND object;
+    GLint size[2];
+    GLboolean wm_close;
+};
+
+struct _GLCXpbuffer
+{
+    GLenum type;
+};
+
+static inline LRESULT CALLBACK glcxWindowProc(
+    HWND window,
+    UINT message,
+    WPARAM wparam,
+    LPARAM lparam)
+{
+    GLCXwindow glcx_window;
+
+    switch(message) {
+    case WM_CREATE:
+        SetWindowLongPtr(
+            window, 
+            GWLP_USERDATA, 
+            (LONG)((LPCREATESTRUCT)lparam)->lpCreateParams);
+        break;
+    case WM_CLOSE:
+        PostMessage(window, __GLCX_MSG_CLOSE, 0, 0);
+        return 0;
+    }
+
+    return DefWindowProc(window, message, wparam, lparam);
+}
+
+static inline ATOM glcxGetWindowClass()
+{
+    static ATOM window_atom = 0;
+    WNDCLASS window_class = {0};
+
+    if(!window_atom) {
+        window_class.style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
+        window_class.lpfnWndProc = glcxWindowProc;
+        window_class.hInstance = GetModuleHandle(NULL);
+        window_class.hbrBackground = (HBRUSH)COLOR_WINDOW;
+        window_class.lpszClassName = __GLCX_WINDOW_CLASS_NAME;
+
+        window_atom = RegisterClass(&window_class);
+
+        if(!window_atom) {
+            __GLCX_LOG("RegisterClass failed; error code %d", GetLastError());
+        }
+    }
+
+    return window_atom;
+}
+
+static inline HWND glcxGetDummyWindow()
+{
+    static HWND dummy_window = 0;
+
+    if(!dummy_window) {
+        if(!glcxGetWindowClass()) {
+            return GL_FALSE;
+        }
+
+        dummy_window = CreateWindow(
+            __GLCX_WINDOW_CLASS_NAME,
+            "GLCX WINDOW",
+            WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            640,
+            480,
+            NULL,
+            NULL,
+            GetModuleHandle(NULL),
+            NULL);
+
+        if(!dummy_window) {
+            __GLCX_LOG("CreateWindow failed; error code %d", GetLastError());
+            return GL_FALSE;
+        }
+    }
+
+    return dummy_window;
+}
+
+GLboolean glcxChooseConfig(
+    const GLint* attributes,
+    GLCXconfig* configs,
+    GLint configs_size,
+    GLint* configs_num)
+{
+    PIXELFORMATDESCRIPTOR pixel_format_desc = {0};
+    GLint pixel_format;
+
+    if(!glcxGetDummyWindow()) {
+        return GL_FALSE;
+    }
+
+    pixel_format_desc.nSize = sizeof(pixel_format_desc);
+    pixel_format_desc.nVersion = 1;
+    pixel_format_desc.dwFlags = PFD_DRAW_TO_WINDOW 
+                | PFD_SUPPORT_OPENGL 
+                | PFD_DOUBLEBUFFER;
+    pixel_format_desc.iPixelType = PFD_TYPE_RGBA;
+    pixel_format_desc.cColorBits = 24;
+    pixel_format_desc.cDepthBits = 32;
+    
+    pixel_format = ChoosePixelFormat(
+        GetDC(glcxGetDummyWindow()), 
+        &pixel_format_desc);
+
+    if(!pixel_format) {
+        __GLCX_LOG("ChoosePixelFormat failed; error code %d", GetLastError());
+        return GL_FALSE;
+    }
+
+    configs[0].pixel_format_desc = pixel_format_desc;
+    configs[0].pixel_format = pixel_format;
+
+    *configs_num = 1;
+
+    return GL_TRUE;
+}
+
+GLCXcontext glcxCreateContext(const GLCXconfig config)
+{
+    GLCXcontext context = glcxMalloc(sizeof(struct _GLCXcontext));
+
+    if(!SetPixelFormat(
+        GetDC(glcxGetDummyWindow()),
+        config.pixel_format,
+        &config.pixel_format_desc)) {
+        __GLCX_LOG("SetPixelFormat failed; error code %d", GetLastError());
+        glcxDestroyContext(context);
+        return NULL;
+    }
+
+    context->object = wglCreateContext(GetDC(glcxGetDummyWindow()));
+    if(!context->object) {
+        __GLCX_LOG("wglCreateContext failed; error code %d", GetLastError());
+        glcxDestroyContext(context);
+        return NULL;
+    }
+
+    return context;
+}
+
+GLboolean glcxDestroyContext(GLCXcontext context)
+{
+    if(context->object) {
+        wglDeleteContext(context->object);
+    }
+    free(context);
+
+    return GL_TRUE;
+}
+
+GLboolean glcxMakeCurrent(GLCXdrawable drawable, GLCXcontext context)
+{
+    GLenum* type = (GLenum*)drawable;
+    HDC dc;
+    HGLRC glrc = context->object;
+
+    switch(*type) {
+    case GLCX_TYPE_WINDOW:  dc = GetDC(((GLCXwindow)drawable)->object);  break;
+    case GLCX_TYPE_PBUFFER: return GL_FALSE;
+    default:                return GL_FALSE;
+    }
+
+    if(wglMakeCurrent(dc, glrc) != TRUE) {
+        __GLCX_LOG("wglMakeCurrent failed; error code %d", GetLastError());
+        return GL_FALSE;
+    }
+
+    return GL_TRUE;
+}
+
+GLCXwindow glcxCreateWindow(const GLCXconfig config, const GLint* attributes)
+{
+    GLCXwindow window = glcxMalloc(sizeof(struct _GLCXwindow));
+    const GLint* attribute;
+
+    window->type = GLCX_TYPE_WINDOW;
+    window->size[0] = 640;
+    window->size[1] = 480;
+
+    for(attribute = attributes; 
+    attribute && *attribute != GLCX_ATTR_NONE; 
+    ++attribute) {
+        switch(*attribute) {
+        case GLCX_ATTR_WIDTH:  window->size[0] = *(attribute + 1); break;
+        case GLCX_ATTR_HEIGHT: window->size[1] = *(attribute + 1); break;
+        }
+    }
+    
+    window->object = CreateWindow(
+        __GLCX_WINDOW_CLASS_NAME,
+        "GLCX WINDOW",
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        window->size[0],
+        window->size[1],
+        NULL,
+        NULL,
+        GetModuleHandle(NULL),
+        window);
+
+    if(!window->object) {
+        __GLCX_LOG("CreateWindow failed; error code %d", GetLastError());
+        glcxDestroyWindow(window);
+        return NULL;
+    }
+
+    if(!SetPixelFormat(
+        GetDC(window->object),
+        config.pixel_format,
+        &config.pixel_format_desc)) {
+        __GLCX_LOG("SetPixelFormat failed; error code %d", GetLastError());
+        glcxDestroyWindow(window);
+        return NULL;
+    }
+
+    UpdateWindow(window->object);
+    ShowWindow(window->object, TRUE);
+
+    glcxPushWindow(window);
+
+    return window;
+}
+
+GLboolean glcxDestroyWindow(GLCXwindow window)
+{
+    glcxPopWindow(window);
+
+    if(window->object) {
+        DestroyWindow(window->object);
+    }
+    free(window);
+
+    return GL_TRUE;
+}
+
+GLboolean glcxSwapBuffers(GLCXwindow window)
+{
+    return SwapBuffers(GetDC(window->object)) == TRUE ? GL_TRUE : GL_FALSE;
+}
+
+GLboolean glcxPollEvent(GLCXevent* event)
+{
+    MSG msg;
+    size_t i;
+    GLCXwindow glcx_window = NULL;
+
+    if(PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+        for(i = 0; i < __GLCX_WINDOW_LIST_SIZE; ++i) {
+            if(glcx_window_list[i] 
+            && glcx_window_list[i]->object == msg.hwnd) {
+                glcx_window = glcx_window_list[i];
+                break;
+            }
+        }
+
+        if(glcx_window && msg.message == __GLCX_MSG_CLOSE) {
+            event->type = GLCX_EVENT_CLOSE;
+            event->window = glcx_window;
+        } else {
+            DispatchMessage(&msg);
+            TranslateMessage(&msg);
+        }
+
+        return GL_TRUE;
+    }
+
+    return GL_FALSE;
+}
+
+GLboolean glcxPostEvent(
+    GLCXwindow window, 
+    GLenum message,
+    GLint param)
+{
+    UINT native_message;
+    LPARAM native_param;
+
+    switch(message) {
+    case GLCX_EVENT_CLOSE:  native_message = WM_CLOSE;  break;
+    }
+
+    PostMessage(window->object, native_message, native_param, 0);
+
+    return GL_TRUE;
+}
+
 #endif
 
 #ifdef __cplusplus
