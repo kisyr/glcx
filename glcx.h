@@ -490,6 +490,31 @@ GLboolean glcxPollEvent(GLCXevent* event)
     return GL_FALSE;
 }
 
+GLboolean glcxPostEvent(GLCXwindow window, GLenum type, GLint param)
+{
+    XEvent event = {0};
+
+    switch(type) {
+    case GLCX_EVENT_CLOSE:
+        event.xclient.type = ClientMessage;
+        event.xclient.send_event = True;
+        event.xclient.display = glcx_display;
+        event.xclient.window = window->object;
+        event.xclient.message_type = window->wm_delete;
+        event.xclient.format = 8; /* vital */
+        event.xclient.data.l[0] = window->wm_delete;
+        break;
+    default:
+        return GL_FALSE;
+    }
+
+    if(!XSendEvent(glcx_display, window->object, True, 0xff, (XEvent*)&event)) {
+        return GL_FALSE;
+    }
+
+    return GL_TRUE;
+}
+
 #endif
 
 /*****************************************************************************
@@ -795,16 +820,14 @@ GLboolean glcxPollEvent(GLCXevent* event)
     return GL_FALSE;
 }
 
-GLboolean glcxPostEvent(
-    GLCXwindow window, 
-    GLenum message,
-    GLint param)
+GLboolean glcxPostEvent(GLCXwindow window, GLenum type, GLint param)
 {
     UINT native_message;
     LPARAM native_param;
 
-    switch(message) {
+    switch(type) {
     case GLCX_EVENT_CLOSE:  native_message = WM_CLOSE;  break;
+    default:                return GL_FALSE;
     }
 
     PostMessage(window->object, native_message, native_param, 0);
